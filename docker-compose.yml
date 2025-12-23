@@ -22,7 +22,6 @@ services:
 
   redis-billionmail:
     image: redis:7.4.2-alpine
-    user: "999:999"
     hostname: redis
     entrypoint: [ "/bin/sh", "/redis-conf.sh" ]
     volumes:
