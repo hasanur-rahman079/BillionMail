@@ -22,8 +22,8 @@ services:
 
   redis-billionmail:
     image: redis:7.4.2-alpine
+    user: "999:999"
     hostname: redis
-    command: [ "redis-server", "--requirepass", "${REDISPASS}", "--stop-writes-on-bgsave-error", "no" ] # disable stop writes on bgsave error for dokploy error
     entrypoint: [ "/bin/sh", "/redis-conf.sh" ]
     volumes:
       - ./redis-data:/data
