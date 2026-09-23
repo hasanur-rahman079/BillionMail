@@ -211,6 +211,33 @@ services:
             - core
 
 
+    # Keeps the mail TLS certificate in sync with the one the reverse proxy already
+    # issues and renews. Needed because a proxy (Dokploy's Traefik) owns port 80 and
+    # swallows /.well-known/acme-challenge/, so BillionMail's own HTTP-01 ACME can
+    # never complete. Harmless no-op when no acme.json is mounted (plain deployments
+    # without a proxy, where BillionMail's own ACME works normally).
+    certsync-billionmail:
+      image: docker:27-cli
+      hostname: certsync
+      restart: always
+      command: ["/bin/sh", "/certsync.sh"]
+      environment:
+        - TZ=${TZ}
+        - CERT_DOMAIN=${BILLIONMAIL_HOSTNAME}
+        - CERT_RESOLVER=${CERT_RESOLVER:-letsencrypt}
+        - ACME_FILE=${ACME_FILE:-/acme/acme.json}
+        - INTERVAL=${CERTSYNC_INTERVAL:-3600}
+      volumes:
+        - ./scripts/certsync.sh:/certsync.sh:ro
+        - ${ACME_DIR:-/etc/dokploy/traefik/dynamic}:/acme:ro
+        - bm-ssl:/ssl
+        - /var/run/docker.sock:/var/run/docker.sock
+      networks:
+        billionmail-network:
+          aliases:
+            - certsync
+
+
 # Named volumes keep all persistent state in /var/lib/docker/volumes, OUTSIDE this
 # git checkout. Relative bind mounts (./postgresql-data etc.) live inside the clone
 # directory and are destroyed whenever the checkout is regenerated (e.g. a Dokploy
