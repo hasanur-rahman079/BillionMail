@@ -41,27 +41,32 @@ set -eu
 # Portable across GNU date and busybox (the sidecar runs on Alpine).
 log() { echo "[certsync] $(date -u +%Y-%m-%dT%H:%M:%SZ) $*"; }
 
-# Environment values are compared EXACTLY against strings in acme.json. A stray
-# CR (CRLF .env), a trailing space or a trailing dot makes the comparison fail
-# while looking perfectly correct in any log line -- the certificate is present
-# but never matches. Normalise defensively rather than trust the input.
-trim() {
-    printf '%s' "$1" | tr -d '\r' \
-        | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's/\.*$//'
+# Environment values are compared EXACTLY against strings inside acme.json, so a
+# stray CR (CRLF .env), a trailing space or a trailing dot makes the comparison
+# fail while every log line still looks perfectly correct. Normalise defensively
+# and name the offending variable rather than trust the input.
+#
+# Sets NORM_OUT and may log -- never call it inside a command substitution, or
+# the warning lines would be captured into the variable.
+NORM_OUT=""
+norm() {
+    name="$1"; raw="$2"; def="$3"
+    [ -n "$raw" ] || raw="$def"
+    val=$(printf '%s' "$raw" | tr -d '\r' \
+        | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's/\.*$//')
+    if [ "$raw" != "$val" ]; then
+        log "WARNING: $name was not clean; using [$val]"
+        log "         raw bytes:$({ printf '%s' "$raw" | od -An -c | tr -s ' '; })"
+        log "         fix it where it is defined (Dokploy environment or .env)"
+    fi
+    NORM_OUT="$val"
 }
 
-raw_domain="${CERT_DOMAIN:-}"
-ACME_FILE=$(trim "${ACME_FILE:-/acme/acme.json}")
-CERT_RESOLVER=$(trim "${CERT_RESOLVER:-letsencrypt}")
-CERT_DOMAIN=$(trim "$raw_domain")
-SSL_DIR=$(trim "${SSL_DIR:-/ssl}")
-INTERVAL=$(trim "${INTERVAL:-3600}")
-
-if [ "$raw_domain" != "$CERT_DOMAIN" ]; then
-    log "WARNING: CERT_DOMAIN was not clean; using [$CERT_DOMAIN]."
-    log "         raw value, one char per token: $(printf '%s' "$raw_domain" | od -An -c | tr -s ' ')"
-    log "         fix BILLIONMAIL_HOSTNAME in .env -- postfix and dovecot receive it too"
-fi
+norm ACME_FILE     "${ACME_FILE:-}"     /acme/acme.json; ACME_FILE="$NORM_OUT"
+norm CERT_RESOLVER "${CERT_RESOLVER:-}" letsencrypt;     CERT_RESOLVER="$NORM_OUT"
+norm CERT_DOMAIN   "${CERT_DOMAIN:-}"   "";              CERT_DOMAIN="$NORM_OUT"
+norm SSL_DIR       "${SSL_DIR:-}"       /ssl;            SSL_DIR="$NORM_OUT"
+norm INTERVAL      "${INTERVAL:-}"      3600;            INTERVAL="$NORM_OUT"
 
 if [ -z "$CERT_DOMAIN" ]; then
     log "CERT_DOMAIN is empty (set BILLIONMAIL_HOSTNAME); nothing to do"
