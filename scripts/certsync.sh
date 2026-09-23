@@ -160,22 +160,19 @@ install_if_changed() {
     fi
 }
 
-reload_services() {
+# A reload is NOT reliable here. Observed in the field: `doveadm reload` reported
+# success yet dovecot kept serving the previous certificate, because the daemon
+# caches the PEM in memory. Restarting the container guarantees the new file is
+# read. This only runs when the certificate content actually changes (the proxy
+# renews roughly every 60 days), and the mail queue and mailboxes live on volumes,
+# so nothing is lost.
+restart_services() {
     names=$(docker ps --format '{{.Names}}' 2>/dev/null \
         | grep -E 'postfix-billionmail|dovecot-billionmail' || true)
-    [ -n "$names" ] || { log "no mail containers found to reload"; return 0; }
+    [ -n "$names" ] || { log "no mail containers found to restart"; return 0; }
     for c in $names; do
-        case "$c" in
-            *postfix-billionmail*)
-                log "reloading postfix in $c"
-                docker exec "$c" postfix reload >/dev/null 2>&1 || log "postfix reload failed in $c"
-                ;;
-            *dovecot-billionmail*)
-                log "reloading dovecot in $c"
-                docker exec "$c" sh -c 'doveadm reload 2>/dev/null || service dovecot reload' \
-                    >/dev/null 2>&1 || log "dovecot reload failed in $c"
-                ;;
-        esac
+        log "restarting $c so it reads the new certificate"
+        docker restart "$c" >/dev/null 2>&1 || log "restart failed for $c"
     done
 }
 
@@ -245,7 +242,7 @@ sync_once() {
 
     if [ "$CHANGED" = 1 ]; then
         log "installed certificates for:$synced"
-        reload_services
+        restart_services
     else
         log "certificates already current for:$synced"
     fi

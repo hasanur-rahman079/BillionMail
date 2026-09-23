@@ -231,7 +231,7 @@ services:
         # FILE: Compose only recreates a container when its configuration changes,
         # so without this a redeploy would leave the previous script running from a
         # replaced inode and the update would silently never take effect.
-        - CERTSYNC_VERSION=${CERTSYNC_VERSION:-4}
+        - CERTSYNC_VERSION=${CERTSYNC_VERSION:-5}
       volumes:
         - ./scripts/certsync.sh:/certsync.sh:ro
         - ${ACME_DIR:-/etc/dokploy/traefik/dynamic}:/acme:ro
