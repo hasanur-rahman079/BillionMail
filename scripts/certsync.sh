@@ -115,6 +115,12 @@ cert_domains() {
 }
 
 # Print one PEM field of the certificate whose primary domain (or SAN) is $1.
+#
+# The field name is matched case-INSENSITIVELY over the object's own keys: Traefik
+# writes this struct with inconsistent JSON tags (domain and certificate key are
+# lower case, but "Store" is capitalised), and relying on one exact spelling
+# silently yields null -- which then looks like "no certificate present".
+#
 # jq's stderr is deliberately NOT suppressed: if the file cannot be read or parsed,
 # the reason must reach the container log instead of a bare "not found".
 extract_field() {
@@ -122,7 +128,9 @@ extract_field() {
     jq -r --arg r "$CERT_RESOLVER" --arg d "$want" --arg f "$field" '
         [ .[$r].Certificates[]?
           | select((.domain.main == $d) or (((.domain.sans // []) | index($d)) != null)) ]
-        | if length == 0 then empty else .[0][$f] end
+        | if length == 0 then empty
+          else ( [ .[0] | to_entries[] | select((.key | ascii_downcase) == $f) | .value ] | first )
+          end
     ' "$ACME_FILE" || true
 }
 
@@ -168,6 +176,7 @@ sync_once() {
     fi
 
     log "acme.json: $(wc -c < "$ACME_FILE" | tr -d ' ') bytes; resolvers: $(jq -r 'keys | join(", ")' "$ACME_FILE" 2>/dev/null)"
+    log "certificate object keys: $(jq -r --arg r "$CERT_RESOLVER" '.[$r].Certificates[0]? | keys | join(",")' "$ACME_FILE" 2>/dev/null)"
 
     domains=$(cert_domains)
     if [ -z "$domains" ]; then
