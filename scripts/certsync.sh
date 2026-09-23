@@ -38,14 +38,30 @@
 #
 set -eu
 
-ACME_FILE="${ACME_FILE:-/acme/acme.json}"
-CERT_RESOLVER="${CERT_RESOLVER:-letsencrypt}"
-CERT_DOMAIN="${CERT_DOMAIN:-}"
-SSL_DIR="${SSL_DIR:-/ssl}"
-INTERVAL="${INTERVAL:-3600}"
-
 # Portable across GNU date and busybox (the sidecar runs on Alpine).
 log() { echo "[certsync] $(date -u +%Y-%m-%dT%H:%M:%SZ) $*"; }
+
+# Environment values are compared EXACTLY against strings in acme.json. A stray
+# CR (CRLF .env), a trailing space or a trailing dot makes the comparison fail
+# while looking perfectly correct in any log line -- the certificate is present
+# but never matches. Normalise defensively rather than trust the input.
+trim() {
+    printf '%s' "$1" | tr -d '\r' \
+        | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's/\.*$//'
+}
+
+raw_domain="${CERT_DOMAIN:-}"
+ACME_FILE=$(trim "${ACME_FILE:-/acme/acme.json}")
+CERT_RESOLVER=$(trim "${CERT_RESOLVER:-letsencrypt}")
+CERT_DOMAIN=$(trim "$raw_domain")
+SSL_DIR=$(trim "${SSL_DIR:-/ssl}")
+INTERVAL=$(trim "${INTERVAL:-3600}")
+
+if [ "$raw_domain" != "$CERT_DOMAIN" ]; then
+    log "WARNING: CERT_DOMAIN was not clean; using [$CERT_DOMAIN]."
+    log "         raw value, one char per token: $(printf '%s' "$raw_domain" | od -An -c | tr -s ' ')"
+    log "         fix BILLIONMAIL_HOSTNAME in .env -- postfix and dovecot receive it too"
+fi
 
 if [ -z "$CERT_DOMAIN" ]; then
     log "CERT_DOMAIN is empty (set BILLIONMAIL_HOSTNAME); nothing to do"
