@@ -5,8 +5,8 @@ services:
       image: postgres:17.4-alpine
       hostname: pgsql
       volumes:
-        - ./postgresql-data:/var/lib/postgresql/data
-        - ./postgresql-socket:/var/run/postgresql
+        - bm-postgresql-data:/var/lib/postgresql/data
+        - bm-postgresql-socket:/var/run/postgresql
       environment:
         - TZ=${TZ}
         - POSTGRES_DB=${DBNAME}
@@ -25,7 +25,7 @@ services:
       hostname: redis
       entrypoint: ["/bin/sh","/redis-conf.sh"]
       volumes:
-        - ./redis-data:/data
+        - bm-redis-data:/data
         - ./conf/redis/redis-conf.sh:/redis-conf.sh
       restart: always
       ports:
@@ -53,7 +53,7 @@ services:
         - ./conf/rspamd/local.d:/etc/rspamd/local.d
         - ./conf/rspamd/statistic.conf:/etc/rspamd/statistic.conf
         - ./conf/rspamd/rspamd.conf:/etc/rspamd/rspamd.conf 
-        - ./rspamd-data:/var/lib/rspamd
+        - bm-rspamd-data:/var/lib/rspamd
         - ./logs/rspamd:/var/log/rspamd
       restart: always
       networks:
@@ -74,11 +74,11 @@ services:
         - ./conf/dovecot/dovecot.conf:/etc/dovecot/dovecot.conf
         - ./conf/dovecot/rsyslog.conf:/etc/rsyslog.conf
         - ./logs/dovecot:/var/log/mail
-        - ./ssl:/etc/ssl/mail
+        - bm-ssl:/etc/ssl/mail
         - ./ssl-self-signed:/etc/ssl/ssl-self-signed
-        - ./vmail-data:/var/vmail
-        - ./rspamd-data:/var/lib/rspamd
-        - ./postgresql-socket:/var/run/postgresql
+        - bm-vmail-data:/var/vmail
+        - bm-rspamd-data:/var/lib/rspamd
+        - bm-postgresql-socket:/var/run/postgresql
       environment:
         - DBNAME=${DBNAME}
         - DBUSER=${DBUSER}
@@ -116,10 +116,10 @@ services:
         - ./conf/postfix/sql:/etc/postfix/sql
         - ./conf/postfix/rsyslog.conf:/etc/rsyslog.conf
         - ./logs/postfix:/var/log/mail
-        - ./ssl:/etc/ssl/mail
-        - ./postfix-data:/var/spool/postfix
-        - ./rspamd-data:/var/lib/rspamd
-        - ./postgresql-socket:/var/run/postgresql
+        - bm-ssl:/etc/ssl/mail
+        - bm-postfix-data:/var/spool/postfix
+        - bm-rspamd-data:/var/lib/rspamd
+        - bm-postgresql-socket:/var/run/postgresql
       environment:
         - TZ=${TZ}
         - DBNAME=${DBNAME}
@@ -149,7 +149,7 @@ services:
         - dovecot-billionmail
         - postfix-billionmail
       volumes:
-        - ./webmail-data:/var/www/html
+        - bm-webmail-data:/var/www/html
         - ./conf/webmail/mime.types:/var/roundcube/config/mime.types
         - ./conf/webmail:/var/roundcube/config
         - ./conf/php:/usr/local/etc
@@ -178,22 +178,22 @@ services:
       depends_on:
         - pgsql-billionmail
       volumes:
-        - ./ssl:/etc/ssl/mail
+        - bm-ssl:/etc/ssl/mail
         - ./ssl-self-signed:/etc/ssl/ssl-self-signed
         - ./conf/core/fail2ban/filter.d:/etc/fail2ban/filter.d
         - ./conf/core/fail2ban/jail.d:/etc/fail2ban/jail.d
         - ./logs/fail2ban:/var/log/fail2ban
-        - ./postgresql-socket:/opt/billionmail/postgresql-socket
+        - bm-postgresql-socket:/opt/billionmail/postgresql-socket
         - ./php-sock:/opt/billionmail/php-sock
-        - ./rspamd-data:/opt/billionmail/rspamd-data
-        - ./webmail-data:/opt/billionmail/webmail-data
+        - bm-rspamd-data:/opt/billionmail/rspamd-data
+        - bm-webmail-data:/opt/billionmail/webmail-data
         - ./.env:/opt/billionmail/.env
         - ./conf:/opt/billionmail/conf
         - ./logs:/opt/billionmail/logs
         - ./logs/core:/opt/billionmail/core/logs
-        - ./core-data:/opt/billionmail/core/data
+        - bm-core-data:/opt/billionmail/core/data
         - /var/run/docker.sock:/var/run/docker.sock:ro
-        - ./vmail-data:/opt/billionmail/vmail-data
+        - bm-vmail-data:/opt/billionmail/vmail-data
       environment:
         - TZ=${TZ}
         - FAIL2BAN_INIT=${FAIL2BAN_INIT:-y}
@@ -210,6 +210,21 @@ services:
           aliases:
             - core
 
+
+# Named volumes keep all persistent state in /var/lib/docker/volumes, OUTSIDE this
+# git checkout. Relative bind mounts (./postgresql-data etc.) live inside the clone
+# directory and are destroyed whenever the checkout is regenerated (e.g. a Dokploy
+# redeploy), which silently wipes the database, mailboxes, DKIM keys and certs.
+volumes:
+  bm-postgresql-data:
+  bm-postgresql-socket:
+  bm-redis-data:
+  bm-rspamd-data:
+  bm-vmail-data:
+  bm-postfix-data:
+  bm-webmail-data:
+  bm-core-data:
+  bm-ssl:
 
 networks:
   billionmail-network:
