@@ -62,11 +62,14 @@ fi
 # Matches on the certificate's primary domain, falling back to SANs.
 extract() {
     field="$1"
+    # NOTE: jq's stderr is deliberately NOT suppressed -- if the file cannot be
+    # read or parsed, the reason must reach the container log instead of being
+    # reported as a bare "no certificate".
     jq -r --arg r "$CERT_RESOLVER" --arg d "$CERT_DOMAIN" --arg f "$field" '
         [ .[$r].Certificates[]?
           | select((.domain.main == $d) or (((.domain.sans // []) | index($d)) != null)) ]
         | if length == 0 then empty else .[0][$f] end
-    ' "$ACME_FILE" 2>/dev/null || true
+    ' "$ACME_FILE" || true
 }
 
 # Write $1 to $2 only when the content differs. Sets CHANGED.
@@ -100,10 +103,17 @@ reload_services() {
 }
 
 sync_once() {
-    if [ ! -s "$ACME_FILE" ]; then
+    if [ ! -e "$ACME_FILE" ]; then
         log "no acme.json at $ACME_FILE; leaving BillionMail's own ACME alone"
         return 0
     fi
+
+    if [ ! -r "$ACME_FILE" ]; then
+        log "acme.json is NOT readable by this container: $(ls -l "$ACME_FILE" 2>&1)"
+        return 0
+    fi
+
+    log "acme.json: $(wc -c < "$ACME_FILE" | tr -d ' ') bytes; resolvers: $(jq -r 'keys | join(", ")' "$ACME_FILE" 2>/dev/null)"
 
     cert=$(extract certificate)
     key=$(extract key)
@@ -150,7 +160,8 @@ sync_once() {
     fi
 }
 
-log "start: domain=$CERT_DOMAIN resolver=$CERT_RESOLVER acme=$ACME_FILE interval=${INTERVAL}s"
+# Brackets make hidden characters (e.g. a stray CR from a CRLF .env) visible.
+log "start: domain=[$CERT_DOMAIN] resolver=[$CERT_RESOLVER] acme=$ACME_FILE interval=${INTERVAL}s"
 while :; do
     sync_once || log "sync attempt failed (will retry)"
     sleep "$INTERVAL"
