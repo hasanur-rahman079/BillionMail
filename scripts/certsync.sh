@@ -114,6 +114,21 @@ cert_domains() {
         "$ACME_FILE" 2>/dev/null | sort -u
 }
 
+# Traefik stores the certificate and key as Go []byte, and encoding/json renders
+# []byte as BASE64 -- not PEM. Everything downstream (postfix, dovecot, BillionMail)
+# needs PEM, so decode here. A value that is already PEM is passed through
+# unchanged, so either storage form works.
+decode_pem() {
+    v="$1"
+    case "$v" in
+        *"BEGIN "*) printf '%s\n' "$v"; return 0 ;;
+    esac
+    out=$(printf '%s' "$v" | base64 -d 2>/dev/null) \
+        || out=$(printf '%s' "$v" | openssl base64 -d -A 2>/dev/null) \
+        || { log "could not decode PEM material from acme.json (not base64 or PEM)"; return 1; }
+    printf '%s\n' "$out"
+}
+
 # Print one PEM field of the certificate whose primary domain (or SAN) is $1.
 #
 # The field name is matched case-INSENSITIVELY over the object's own keys: Traefik
@@ -200,6 +215,8 @@ sync_once() {
 
         c=$(extract_field "$d" certificate)
         k=$(extract_field "$d" key)
+        [ -n "$c" ] && c=$(decode_pem "$c") || c=""
+        [ -n "$k" ] && k=$(decode_pem "$k") || k=""
 
         case "$c" in *"BEGIN CERTIFICATE"*) ;; *) log "no usable certificate for [$d]"; continue ;; esac
         case "$k" in *"PRIVATE KEY"*)       ;; *) log "no usable private key for [$d]"; continue ;; esac
