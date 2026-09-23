@@ -1,42 +1,71 @@
 #!/bin/sh
 #
-# certsync — keep BillionMail's mail TLS certificate in sync with the certificate
-# that the reverse proxy (Dokploy's Traefik) already obtains and renews.
+# certsync — keep BillionMail's TLS certificates in sync with the certificates the
+# reverse proxy (Dokploy's Traefik) already obtains and renews.
 #
 # WHY THIS EXISTS
 # ---------------
 # BillionMail issues its own certificates with a hardcoded HTTP-01 challenge
-# (core/internal/service/domains/ssl.go -> acme.ApplySSLWithExistingServer(..., "http", ...)).
-# Behind Dokploy, Traefik owns port 80 and installs a *global* handler for
-# /.well-known/acme-challenge/ on the "web" entrypoint. Traefik answers that path
-# for every host it manages and returns 404 for tokens it does not know, without
-# falling through to any router. The symptoms in the Traefik log are:
+# (core/internal/service/domains/ssl.go -> ApplySSLWithExistingServer(..., "http", ...)).
+#
+# Behind Dokploy that can never work. Traefik owns port 80 and installs a *global*
+# handler for /.well-known/acme-challenge/ on the "web" entrypoint. It answers that
+# path for every host it manages, returns 404 for tokens it does not know, and does
+# NOT fall through to any router. The tell-tale line in the Traefik log is:
 #
 #   ERR Cannot retrieve the ACME challenge for mail.example.com (token "...")
 #
-# So BillionMail's "Apply Free Certificate" can never complete, and no router,
-# priority or middleware change can fix it: port 80 cannot be shared.
+# So the UI's "Apply Free Certificate" always ends in a 404, and no router, priority
+# or middleware change can fix it: port 80 cannot be shared. Instead of competing,
+# this sidecar lets the proxy own issuance AND renewal and copies the results in.
 #
-# The fix is to stop competing. Let the proxy own issuance + renewal (it already
-# does both), and copy the resulting PEM into the mail services, which read:
+# WHAT IT DOES
+# ------------
+# For EVERY certificate in the proxy's acme.json it writes BillionMail's per-domain
+# layout:
 #
-#   /etc/ssl/mail/cert.pem   and   /etc/ssl/mail/key.pem
+#   /etc/ssl/mail/<domain>/fullchain.pem
+#   /etc/ssl/mail/<domain>/privkey.pem
 #
-#   postfix : conf/postfix/main.cf           (smtpd_tls_cert_file / key_file)
-#   dovecot : conf/dovecot/conf.d/10-ssl.conf (ssl_cert / ssl_key)
+# and for the primary mail hostname (CERT_DOMAIN) also the two files the mail
+# daemons read directly:
+#
+#   /etc/ssl/mail/cert.pem      postfix: conf/postfix/main.cf
+#   /etc/ssl/mail/key.pem       dovecot: conf/dovecot/conf.d/10-ssl.conf
 #
 # /etc/ssl/mail is the bm-ssl volume (SSL_PATH in core/internal/consts/consts.go).
+# Whenever anything changes, postfix and dovecot are reloaded.
 #
-# Because the proxy renews roughly 30 days before expiry and this script copies it
-# promptly, the installed cert always has well over 3 days left — so BillionMail's
-# own AutoRenewSSL (which fires at <3 days, ssl.go) never triggers and never logs
-# failed challenge attempts.
+# Because BillionMail's getSSLInfo (mail_service/certificate.go:473) falls back to
+# reading exactly those per-domain files, every synced certificate also shows up in
+# the Domain SSL panel -- so no one is left staring at an empty box.
 #
-# If no acme.json is present (e.g. running without Traefik, where nothing steals
-# port 80), this script simply does nothing and BillionMail's own ACME works
-# normally.
+# ADDING A NEW DOMAIN
+# -------------------
+# The certificate must be issued by the proxy, because the proxy owns port 80:
+#   1. add the domain in BillionMail (for its DNS/DKIM records)
+#   2. add its hostname to a Dokploy app with "Let's Encrypt" enabled, so Traefik
+#      issues a certificate for it
+#   3. this sidecar picks it up on its next pass and installs it
+# BillionMail's own "Apply Free Certificate" remains non-functional behind a proxy.
+#
+# RENEWAL
+# -------
+# The proxy renews ~30 days before expiry and this runs every few minutes, so the
+# installed certificate always has far more than the 3 days BillionMail's own
+# AutoRenewSSL waits for. It therefore never fires and never logs failed challenges.
+# Renewal is fully automatic.
+#
+# If no acme.json is mounted (a deployment with no reverse proxy, where nothing
+# steals port 80) this is a harmless no-op and BillionMail's own ACME works normally.
 #
 set -eu
+
+ACME_FILE="${ACME_FILE:-/acme/acme.json}"
+CERT_RESOLVER="${CERT_RESOLVER:-letsencrypt}"
+CERT_DOMAIN="${CERT_DOMAIN:-}"
+SSL_DIR="${SSL_DIR:-/ssl}"
+INTERVAL="${INTERVAL:-300}"
 
 # Portable across GNU date and busybox (the sidecar runs on Alpine).
 log() { echo "[certsync] $(date -u +%Y-%m-%dT%H:%M:%SZ) $*"; }
@@ -44,10 +73,10 @@ log() { echo "[certsync] $(date -u +%Y-%m-%dT%H:%M:%SZ) $*"; }
 # Environment values are compared EXACTLY against strings inside acme.json, so a
 # stray CR (CRLF .env), a trailing space or a trailing dot makes the comparison
 # fail while every log line still looks perfectly correct. Normalise defensively
-# and name the offending variable rather than trust the input.
+# and name the offending variable.
 #
-# Sets NORM_OUT and may log -- never call it inside a command substitution, or
-# the warning lines would be captured into the variable.
+# Sets NORM_OUT and may log -- never call it inside a command substitution, or the
+# warning lines would be captured into the variable.
 NORM_OUT=""
 norm() {
     name="$1"; raw="$2"; def="$3"
@@ -66,7 +95,7 @@ norm ACME_FILE     "${ACME_FILE:-}"     /acme/acme.json; ACME_FILE="$NORM_OUT"
 norm CERT_RESOLVER "${CERT_RESOLVER:-}" letsencrypt;     CERT_RESOLVER="$NORM_OUT"
 norm CERT_DOMAIN   "${CERT_DOMAIN:-}"   "";              CERT_DOMAIN="$NORM_OUT"
 norm SSL_DIR       "${SSL_DIR:-}"       /ssl;            SSL_DIR="$NORM_OUT"
-norm INTERVAL      "${INTERVAL:-}"      3600;            INTERVAL="$NORM_OUT"
+norm INTERVAL      "${INTERVAL:-}"      300;             INTERVAL="$NORM_OUT"
 
 if [ -z "$CERT_DOMAIN" ]; then
     log "CERT_DOMAIN is empty (set BILLIONMAIL_HOSTNAME); nothing to do"
@@ -79,14 +108,18 @@ if ! command -v jq >/dev/null 2>&1; then
     apk add --no-cache jq >/dev/null 2>&1 || { log "FATAL: could not install jq"; exit 1; }
 fi
 
-# Extract a PEM value for our domain from Traefik's acme.json.
-# Matches on the certificate's primary domain, falling back to SANs.
-extract() {
-    field="$1"
-    # NOTE: jq's stderr is deliberately NOT suppressed -- if the file cannot be
-    # read or parsed, the reason must reach the container log instead of being
-    # reported as a bare "no certificate".
-    jq -r --arg r "$CERT_RESOLVER" --arg d "$CERT_DOMAIN" --arg f "$field" '
+# Print every certificate's primary domain under the configured resolver.
+cert_domains() {
+    jq -r --arg r "$CERT_RESOLVER" '.[$r].Certificates[]? | .domain.main // empty' \
+        "$ACME_FILE" 2>/dev/null | sort -u
+}
+
+# Print one PEM field of the certificate whose primary domain (or SAN) is $1.
+# jq's stderr is deliberately NOT suppressed: if the file cannot be read or parsed,
+# the reason must reach the container log instead of a bare "not found".
+extract_field() {
+    want="$1"; field="$2"
+    jq -r --arg r "$CERT_RESOLVER" --arg d "$want" --arg f "$field" '
         [ .[$r].Certificates[]?
           | select((.domain.main == $d) or (((.domain.sans // []) | index($d)) != null)) ]
         | if length == 0 then empty else .[0][$f] end
@@ -136,53 +169,64 @@ sync_once() {
 
     log "acme.json: $(wc -c < "$ACME_FILE" | tr -d ' ') bytes; resolvers: $(jq -r 'keys | join(", ")' "$ACME_FILE" 2>/dev/null)"
 
-    cert=$(extract certificate)
-    key=$(extract key)
-
-    if [ -z "$cert" ] || [ -z "$key" ]; then
-        log "no certificate for $CERT_DOMAIN under resolver '$CERT_RESOLVER' in $ACME_FILE"
-        if [ -r "$ACME_FILE" ]; then
-            log "resolvers in acme.json: $(jq -r 'keys | join(", ")' "$ACME_FILE" 2>/dev/null || echo '<unparseable>')"
-            log "certificates in acme.json: $(jq -r 'to_entries[] | .key as $r | (.value.Certificates // [])[] | "\($r)=\(.domain.main)"' "$ACME_FILE" 2>/dev/null | tr '\n' ' ')"
-            log "hint: point CERT_RESOLVER at the resolver that holds $CERT_DOMAIN"
-        else
-            log "acme.json is not readable by this container"
-        fi
+    domains=$(cert_domains)
+    if [ -z "$domains" ]; then
+        log "no certificates under resolver '$CERT_RESOLVER' in $ACME_FILE"
+        log "certificates present: $(jq -r 'to_entries[] | .key as $r | (.value.Certificates // [])[] | "\($r)=\(.domain.main)"' "$ACME_FILE" 2>/dev/null | tr '\n' ' ')"
         return 0
     fi
 
-    case "$cert" in
-        *"BEGIN CERTIFICATE"*) ;;
-        *) log "entry for $CERT_DOMAIN exists but is not a PEM certificate; refusing to install"; return 0 ;;
-    esac
-    case "$key" in
-        *"PRIVATE KEY"*) ;;
-        *) log "key entry for $CERT_DOMAIN is not a PEM private key; refusing to install"; return 0 ;;
-    esac
-
     tmp=$(mktemp -d)
-    printf '%s\n' "$cert" > "$tmp/cert.pem"
-    printf '%s\n' "$key"  > "$tmp/key.pem"
-
     CHANGED=0
-    # postfix + dovecot read these two names directly
-    install_if_changed "$tmp/cert.pem" "$SSL_DIR/cert.pem"
-    install_if_changed "$tmp/key.pem"  "$SSL_DIR/key.pem"
-    # BillionMail's own per-domain layout, so its UI/cert checks see the cert
-    install_if_changed "$tmp/cert.pem" "$SSL_DIR/$CERT_DOMAIN/fullchain.pem"
-    install_if_changed "$tmp/key.pem"  "$SSL_DIR/$CERT_DOMAIN/privkey.pem"
+    synced=""
+
+    for d in $domains; do
+        # Domains become path components, so refuse anything that is not a hostname.
+        case "$d" in
+            ""|*/*|*..*|*[!A-Za-z0-9.-]*)
+                log "skipping unexpected domain name from acme.json: [$d]"
+                continue
+                ;;
+        esac
+
+        c=$(extract_field "$d" certificate)
+        k=$(extract_field "$d" key)
+
+        case "$c" in *"BEGIN CERTIFICATE"*) ;; *) log "no usable certificate for [$d]"; continue ;; esac
+        case "$k" in *"PRIVATE KEY"*)       ;; *) log "no usable private key for [$d]"; continue ;; esac
+
+        printf '%s\n' "$c" > "$tmp/cert.pem"
+        printf '%s\n' "$k" > "$tmp/key.pem"
+
+        install_if_changed "$tmp/cert.pem" "$SSL_DIR/$d/fullchain.pem"
+        install_if_changed "$tmp/key.pem"  "$SSL_DIR/$d/privkey.pem"
+
+        # The mail daemons read these two fixed names, so they follow the primary
+        # mail hostname only.
+        if [ "$d" = "$CERT_DOMAIN" ]; then
+            install_if_changed "$tmp/cert.pem" "$SSL_DIR/cert.pem"
+            install_if_changed "$tmp/key.pem"  "$SSL_DIR/key.pem"
+        fi
+
+        synced="$synced $d"
+    done
     rm -rf "$tmp"
 
+    if [ -z "$synced" ]; then
+        log "no certificates could be installed"
+        return 0
+    fi
+
     if [ "$CHANGED" = 1 ]; then
-        log "certificate updated for $CERT_DOMAIN"
+        log "installed certificates for:$synced"
         reload_services
     else
-        log "certificate unchanged for $CERT_DOMAIN"
+        log "certificates already current for:$synced"
     fi
 }
 
-# Brackets make hidden characters (e.g. a stray CR from a CRLF .env) visible.
-log "start: domain=[$CERT_DOMAIN] resolver=[$CERT_RESOLVER] acme=$ACME_FILE interval=${INTERVAL}s"
+# Brackets make hidden characters (e.g. a stray CR) visible.
+log "start: primary=[$CERT_DOMAIN] resolver=[$CERT_RESOLVER] acme=$ACME_FILE interval=${INTERVAL}s"
 while :; do
     sync_once || log "sync attempt failed (will retry)"
     sleep "$INTERVAL"
