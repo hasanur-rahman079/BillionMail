@@ -108,13 +108,25 @@ sync_once() {
     cert=$(extract certificate)
     key=$(extract key)
 
+    if [ -z "$cert" ] || [ -z "$key" ]; then
+        log "no certificate for $CERT_DOMAIN under resolver '$CERT_RESOLVER' in $ACME_FILE"
+        if [ -r "$ACME_FILE" ]; then
+            log "resolvers in acme.json: $(jq -r 'keys | join(", ")' "$ACME_FILE" 2>/dev/null || echo '<unparseable>')"
+            log "certificates in acme.json: $(jq -r 'to_entries[] | .key as $r | (.value.Certificates // [])[] | "\($r)=\(.domain.main)"' "$ACME_FILE" 2>/dev/null | tr '\n' ' ')"
+            log "hint: point CERT_RESOLVER at the resolver that holds $CERT_DOMAIN"
+        else
+            log "acme.json is not readable by this container"
+        fi
+        return 0
+    fi
+
     case "$cert" in
         *"BEGIN CERTIFICATE"*) ;;
-        *) log "no certificate for $CERT_DOMAIN in $ACME_FILE (resolver: $CERT_RESOLVER)"; return 0 ;;
+        *) log "entry for $CERT_DOMAIN exists but is not a PEM certificate; refusing to install"; return 0 ;;
     esac
     case "$key" in
         *"PRIVATE KEY"*) ;;
-        *) log "no private key for $CERT_DOMAIN"; return 0 ;;
+        *) log "key entry for $CERT_DOMAIN is not a PEM private key; refusing to install"; return 0 ;;
     esac
 
     tmp=$(mktemp -d)
