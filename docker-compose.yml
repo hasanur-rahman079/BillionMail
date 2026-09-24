@@ -242,6 +242,34 @@ services:
           aliases:
             - certsync
 
+    # BillionMail's .env parser (public.DockerEnv) does NOT strip surrounding
+    # quotes, while Compose does. If the platform writes REDISPASS="secret", redis
+    # is started requiring `secret` while the core authenticates with `"secret"`:
+    # WRONGPASS, core crash-loops, panel unreachable. This normalises the file and
+    # restarts the core. The env file's DIRECTORY is mounted rather than the file,
+    # because a single-file bind mount pins that inode -- after a deploy replaces
+    # the file, a file mount would keep editing the stale one.
+    envsync-billionmail:
+      image: docker:27-cli
+      hostname: envsync
+      restart: always
+      command: ["/bin/sh", "/envsync.sh"]
+      environment:
+        - TZ=${TZ}
+        - ENV_FILE=${ENVSYNC_ENV_FILE:-/checkout/.env}
+        - CORE_MATCH=${ENVSYNC_CORE_MATCH:--core-billionmail-1}
+        - INTERVAL=${ENVSYNC_INTERVAL:-30}
+        # Bump whenever scripts/envsync.sh changes, same reason as CERTSYNC_VERSION.
+        - ENVSYNC_VERSION=${ENVSYNC_VERSION:-1}
+      volumes:
+        - ./scripts/envsync.sh:/envsync.sh:ro
+        - ./:/checkout
+        - /var/run/docker.sock:/var/run/docker.sock
+      networks:
+        billionmail-network:
+          aliases:
+            - envsync
+
 
 # Named volumes keep all persistent state in /var/lib/docker/volumes, OUTSIDE this
 # git checkout. Relative bind mounts (./postgresql-data etc.) live inside the clone
