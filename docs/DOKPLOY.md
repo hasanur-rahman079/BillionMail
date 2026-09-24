@@ -334,6 +334,32 @@ Schema migration is automatic: core runs `CREATE TABLE IF NOT EXISTS` plus the i
   replaced on every deploy. Change the repo instead.
 - **Bump `CERTSYNC_VERSION` with any `scripts/certsync.sh` change**, or the deploy will
   not pick it up.
+- **Changing any value in `.env` / Dokploy's Environment tab requires recreating the
+  containers, not restarting them.** A container's environment is fixed when it is
+  created, so `docker restart` keeps the old value. Redis is the sharpest example: its
+  entrypoint writes `requirepass $REDISPASS` into `/redis.conf` at start, while the core
+  reads `REDISPASS` from the mounted `.env` file (`public.DockerEnv`,
+  `redis_initialization.go:15`). A redis container older than the current `.env` makes
+  every core start fail with:
+
+  ```
+  Redis connection test failed: WRONGPASS invalid username-password pair or user is disabled
+  ```
+
+  The core then exits, supervisord respawns it, and the panel is unreachable. **Fix:
+  Deploy** (a restart will not help). Confirm which side is stale with:
+
+  ```bash
+  R=$(docker exec <project>-redis-billionmail-1 sh -c 'sed -n "s/^requirepass //p" /redis.conf')
+  C=$(docker exec <project>-core-billionmail-1 sh -c 'sed -n "s/^REDISPASS=//p" /opt/billionmail/.env')
+  [ "$R" = "$C" ] && echo MATCH || printf 'MISMATCH\nredis=[%s]\ncore =[%s]\n' "$R" "$C"
+  ```
+
+- **Avoid `#`, quotes and `$` in `REDISPASS` / `DBPASS`.** Compose parses `.env` with its
+  own rules — inline `#` starts a comment, surrounding quotes are stripped, `$` triggers
+  interpolation — while BillionMail's `DockerEnv` reads the file literally. Such
+  characters can leave the two sides disagreeing about the password even after a clean
+  recreate. A plain alphanumeric secret avoids the whole class of problem.
 - **Verify after deploying a change:** the timestamp in `docker logs <project>-certsync-billionmail-1`
   must be recent, and its first line prints the resolved domain, resolver and settings.
 
