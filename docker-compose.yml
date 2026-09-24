@@ -153,7 +153,7 @@ services:
         - ./conf/webmail/mime.types:/var/roundcube/config/mime.types
         - ./conf/webmail:/var/roundcube/config
         - ./conf/php:/usr/local/etc
-        - ./php-sock/:/var/run/
+        - bm-php-sock:/var/run/
       environment:
         - TZ=${TZ}
         - ROUNDCUBEMAIL_DB_TYPE=pgsql
@@ -184,7 +184,7 @@ services:
         - ./conf/core/fail2ban/jail.d:/etc/fail2ban/jail.d
         - ./logs/fail2ban:/var/log/fail2ban
         - bm-postgresql-socket:/opt/billionmail/postgresql-socket
-        - ./php-sock:/opt/billionmail/php-sock
+        - bm-php-sock:/opt/billionmail/php-sock
         - bm-rspamd-data:/opt/billionmail/rspamd-data
         - bm-webmail-data:/opt/billionmail/webmail-data
         - ./.env:/opt/billionmail/.env
@@ -285,6 +285,7 @@ volumes:
   bm-webmail-data:
   bm-core-data:
   bm-ssl:
+  bm-php-sock:
 
 networks:
   billionmail-network:
