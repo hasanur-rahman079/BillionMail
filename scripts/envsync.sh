@@ -12,35 +12,35 @@
 #         if strings.TrimSpace(env[0]) == envName {
 #             envVal = strings.TrimSpace(env[1])   // <- no unquoting
 #
-# There is no handling of surrounding quotes, inline comments or escapes.
-#
-# Docker Compose, however, DOES unquote when it interpolates ${VAR} from the same
-# file. So when the platform writes:
+# No handling of surrounding quotes, inline comments or escapes. Compose, however,
+# DOES unquote when interpolating ${VAR} from the same file. So when the platform
+# writes every value quoted:
 #
 #     REDISPASS="s3cret"
 #
-# Compose gives the redis container `s3cret`, while the core reads the literal
-# `"s3cret"` -- quotes included. Redis then rejects every AUTH with:
+# redis is started requiring `s3cret` while the core authenticates with `"s3cret"`
+# -- quotes included -- and Redis answers:
 #
 #     WRONGPASS invalid username-password pair or user is disabled
 #
-# and the core exits and is respawned in a loop, leaving the panel unreachable.
+# The core then exits, supervisord respawns it, and the panel is unreachable.
 #
-# This sidecar rewrites the file with those quotes removed, so both parsers agree.
-# It runs on a short interval and re-checks every pass, so it also repairs the file
-# after each deploy (the platform rewrites it every time).
+# WHY IT GOES THROUGH THE CORE CONTAINER
+# --------------------------------------
+# It would be simpler to mount the checkout and edit .env directly, but the
+# platform replaces that directory on every deploy: a container bind mount of it
+# ends up pointing at the emptied, deleted directory and can no longer see the
+# file (observed: "no env file ... yet" repeating forever after a deploy).
 #
-# The mount is the DIRECTORY containing the env file, not the file itself: a bind
-# mount of a single file pins that inode, so after a deploy replaces the file the
-# container would keep editing the old one. Accessing it by path avoids that.
-#
-# The rewrite uses `cat > file` rather than `sed -i`, because sed -i replaces the
-# file -- creating a new inode that the *core* container's file bind mount would
-# not see. Truncating and rewriting keeps the same inode.
+# The core container is recreated on every deploy, so ITS mount always refers to
+# the current file. This sidecar therefore reads and rewrites the file through
+# `docker exec`, which needs nothing but the Docker socket. Writing through the
+# container's mount also preserves the inode, which matters because the env file
+# is itself bind-mounted -- replacing it would leave other readers on the old one.
 #
 set -eu
 
-ENV_FILE="${ENV_FILE:-/checkout/.env}"
+ENV_IN_CONTAINER="${ENV_IN_CONTAINER:-/opt/billionmail/.env}"
 CORE_MATCH="${CORE_MATCH:--core-billionmail-1}"
 INTERVAL="${INTERVAL:-30}"
 
@@ -53,39 +53,53 @@ normalise() {
       | sed -e "s/^\([A-Za-z_][A-Za-z0-9_]*\)='\(.*\)'\$/\1=\2/"
 }
 
-restart_core() {
-    names=$(docker ps --format '{{.Names}}' 2>/dev/null | grep -- "$CORE_MATCH" || true)
-    [ -n "$names" ] || { log "no core container matching '$CORE_MATCH' to restart"; return 0; }
-    for c in $names; do
-        log "restarting $c so it re-reads the env file"
-        docker restart "$c" >/dev/null 2>&1 || log "restart failed for $c"
-    done
+find_core() {
+    docker ps --format '{{.Names}}' 2>/dev/null | grep -- "$CORE_MATCH" | head -1 || true
 }
 
 sync_once() {
-    if [ ! -f "$ENV_FILE" ]; then
-        log "no env file at $ENV_FILE yet; nothing to do"
+    core=$(find_core)
+    if [ -z "$core" ]; then
+        log "no core container matching '$CORE_MATCH' is running; nothing to do"
         return 0
     fi
 
-    tmp=$(mktemp)
-    normalise "$ENV_FILE" > "$tmp"
-
-    if cmp -s "$tmp" "$ENV_FILE"; then
-        rm -f "$tmp"
+    if ! docker exec "$core" test -f "$ENV_IN_CONTAINER" 2>/dev/null; then
+        log "$ENV_IN_CONTAINER not present inside $core yet; nothing to do"
         return 0
     fi
 
-    # Report which keys were quoted, without printing their values.
-    log "quoted values found in $ENV_FILE: $(grep -E '^[A-Za-z_][A-Za-z0-9_]*=".*"$' "$ENV_FILE" | cut -d= -f1 | tr '\n' ' ')"
+    tmp=$(mktemp); out=$(mktemp)
+    if ! docker exec "$core" cat "$ENV_IN_CONTAINER" > "$tmp" 2>/dev/null; then
+        log "could not read $ENV_IN_CONTAINER from $core"
+        rm -f "$tmp" "$out"
+        return 0
+    fi
 
-    cat "$tmp" > "$ENV_FILE"
-    rm -f "$tmp"
-    log "env file normalised"
-    restart_core
+    normalise "$tmp" > "$out"
+
+    if cmp -s "$tmp" "$out"; then
+        rm -f "$tmp" "$out"
+        return 0
+    fi
+
+    # Name the offending keys only -- never their values.
+    log "quoted values found: $(grep -E '^[A-Za-z_][A-Za-z0-9_]*=".*"$' "$tmp" | cut -d= -f1 | tr '\n' ' ')"
+
+    # Write back THROUGH the container's mount: same inode, so the bind mount the
+    # core itself reads keeps working.
+    if docker exec -i "$core" sh -c "cat > $ENV_IN_CONTAINER" < "$out"; then
+        log "env file normalised"
+        rm -f "$tmp" "$out"
+        log "restarting $core so it re-reads the env file"
+        docker restart "$core" >/dev/null 2>&1 || log "restart failed for $core"
+    else
+        log "failed to write $ENV_IN_CONTAINER in $core"
+        rm -f "$tmp" "$out"
+    fi
 }
 
-log "start: env=$ENV_FILE core-match=$CORE_MATCH interval=${INTERVAL}s"
+log "start: env=$ENV_IN_CONTAINER core-match=$CORE_MATCH interval=${INTERVAL}s"
 while :; do
     sync_once || log "sync attempt failed (will retry)"
     sleep "$INTERVAL"
