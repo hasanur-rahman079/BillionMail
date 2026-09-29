@@ -68,6 +68,18 @@ docker exec <project>-postfix-billionmail-1 \
 # should echo the domain back
 ```
 
+### The sidecars, and why each exists
+
+| Service | Job | Without it |
+|---|---|---|
+| `certsync-billionmail` | copies the proxy's certificate into `bm-ssl`, restarts the mail daemons when it changes | no valid TLS on 465/587/993; BillionMail's own ACME cannot work behind a proxy |
+| `envsync-billionmail` | strips the quotes platforms add to `.env` values | `WRONGPASS` on Redis; the core crash-loops and the panel is unreachable |
+| `guard-billionmail` | installs the host cron that repairs stale config after a deploy | dovecot answers `* BYE Auth process broken` and webmail fails until someone notices |
+| `bm-php-sock` | (volume) shares the php-fpm socket between webmail and core | `/roundcube` returns a blank white page |
+
+Each of the first three has a `*_VERSION` variable that **must be bumped when its script
+changes** — see "Operational rules".
+
 ## 2. Certificates — why `certsync` exists
 
 BillionMail issues its own certificates with a hardcoded **HTTP-01** challenge
@@ -314,21 +326,46 @@ timeout 5 bash -c 'exec 3<>/dev/tcp/127.0.0.1/143; head -c 120 <&3'; echo   # ex
 docker exec $(docker ps --format '{{.Names}}' | grep -- '-postfix-billionmail-1') ls /etc/postfix/sql/ | wc -l
 ```
 
-### Automatic recovery
+### Automatic recovery — no per-server setup
 
-`--if-stale` makes the script safe to run unattended: it costs one `ls` inside the
-dovecot container when the stack is healthy, and only recreates when a container is
-actually reading an empty configuration directory. One-time setup on the host, and no
-deploy can leave a service broken for more than a few minutes:
+The stack installs its own guard on the host. `guard-billionmail` reads the checkout
+path from **its own compose labels** and writes:
+
+```
+/etc/cron.d/bm-recreate
+*/5 * * * * root <workdir>/scripts/recreate-stack.sh --if-stale >> /var/log/bm-recreate.log 2>&1
+```
+
+Nothing is hardcoded per server — no project name, no absolute path — so a fresh
+server needs **no manual step**. Two details make that work:
+
+- the checkout's **parent** is mounted (a deploy replaces the checkout, never its
+  parent), so the guard always resolves the current script;
+- the cron file is rewritten only when its content would change.
+
+`--if-stale` costs one `ls` inside the dovecot container when the stack is healthy and
+logs nothing at all; it recreates only when a service is genuinely reading an empty
+config directory. That restraint matters, because recreating restarts the mail
+services.
+
+Disable with `INSTALL_CRON=0`; change the frequency with `GUARD_SCHEDULE`.
+
+**Doing it by hand instead** (fallback, and what to do if the guard was disabled) —
+note the project-specific path:
 
 ```bash
+# find your project's directories on this server
+docker ps --format '{{.Label "com.docker.compose.project"}}	{{.Label "com.docker.compose.project.working_dir"}}' | sort -u
+
 cat > /etc/cron.d/bm-recreate <<'EOF'
 */5 * * * * root /etc/dokploy/compose/<project>/code/scripts/recreate-stack.sh --if-stale >> /var/log/bm-recreate.log 2>&1
 EOF
+chmod 644 /etc/cron.d/bm-recreate
 ```
 
-It reports `configuration is current; nothing to do` on a healthy stack, so the log
-stays quiet.
+`<project>` is whatever Dokploy generated for that server (`emspub-billionmail-v3wo9m`
+on one, `self-hosted-apps-bdvetnet-email-server-tql80a` on another) — never reuse it
+across servers, which is exactly why the automatic route is preferred.
 
 ### Long-term
 

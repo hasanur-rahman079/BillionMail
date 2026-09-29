@@ -67,6 +67,12 @@ info=$(docker ps -a \
     | grep -- "$MATCH" | head -1 || true)
 
 if [ -z "$info" ]; then
+    if [ "$IF_STALE" = "1" ]; then
+        # Cron-safe: the stack being absent is not an error worth reporting every
+        # five minutes.
+        echo "no container matching '$MATCH'; nothing to do"
+        exit 0
+    fi
     echo "error: no container matching '$MATCH' found" >&2
     exit 1
 fi

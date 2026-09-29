@@ -242,6 +242,38 @@ services:
           aliases:
             - certsync
 
+    # Installs a HOST cron entry that runs scripts/recreate-stack.sh --if-stale, so a
+    # deploy can never leave a service reading an empty configuration directory.
+    #
+    # Nothing is hardcoded per server: the checkout path comes from this container's
+    # own compose labels, and the checkout's PARENT is mounted (a deploy replaces the
+    # checkout, never its parent), so the script path is always current. That means a
+    # new server needs no manual cron setup.
+    #
+    # Set INSTALL_CRON=0 to disable, or override GUARD_SCHEDULE.
+    guard-billionmail:
+      image: docker:27-cli
+      # deliberately NO hostname: the container id is how it reads its own labels
+      restart: always
+      command: ["/bin/sh", "/install-guard.sh"]
+      environment:
+        - TZ=${TZ}
+        - CRON_DIR=/host-cron
+        - STACK_DIR=/stack
+        - INSTALL_CRON=${INSTALL_CRON:-1}
+        - GUARD_SCHEDULE=${GUARD_SCHEDULE:-*/5 * * * *}
+        # Bump whenever scripts/install-guard.sh changes (same reason as CERTSYNC_VERSION).
+        - GUARD_VERSION=${GUARD_VERSION:-1}
+      volumes:
+        - ./scripts/install-guard.sh:/install-guard.sh:ro
+        - ../:/stack:ro
+        - /etc/cron.d:/host-cron
+        - /var/run/docker.sock:/var/run/docker.sock
+      networks:
+        billionmail-network:
+          aliases:
+            - guard
+
     # BillionMail's .env parser (public.DockerEnv) does NOT strip surrounding
     # quotes, while Compose does. Platforms commonly write every value quoted, so
     # REDISPASS="secret" makes redis require `secret` while the core authenticates
