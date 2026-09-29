@@ -121,6 +121,29 @@ always follow the **primary** hostname (`BILLIONMAIL_HOSTNAME`).
   configuration changes; without a version bump a deploy silently keeps running the
   previous script from a replaced inode. This has already bitten once.
 
+### Which certificates get copied
+
+A shared reverse proxy holds certificates for **every** app on the host, so copying all
+of them would put other tenants' certificates -- private keys included -- into this
+stack's mail volume. `certsync` therefore syncs only what this instance serves:
+
+- the primary mail hostname (`BILLIONMAIL_HOSTNAME`)
+- each domain in BillionMail's own `domain` table, plus that domain's mail hostname
+  (`a_record`, else `mail.<domain>` -- see `public.FormatMX`)
+- anything in `EXTRA_DOMAINS`, for hostnames BillionMail does not know (a webmail or
+  panel hostname, for example)
+
+Per-domain directories left behind by an earlier unrestricted run are removed, but only
+when they carry this script's own `fullchain.pem` + `privkey.pem`, and never the
+primary's. Set `SYNC_ALL=1` to copy everything, or `CLEAN_EXTRA=0` to never delete.
+Check what it decided in its log:
+
+```
+allowed domains: bdvets.org mail.bdvets.org
+not ours, skipped: billing.exomeit.com other-client.com
+removed certificates belonging to other apps: billing.exomeit.com
+```
+
 ### Renewal timeline
 
 Nothing to do, ever:
@@ -319,6 +342,9 @@ Optional, for `certsync`:
 
 ```
 CERT_RESOLVER=letsencrypt               # must match the proxy's certresolver name
+EXTRA_DOMAINS=webmail.example.com       # extra hostnames this instance serves
+SYNC_ALL=0                              # 1 = copy every certificate in acme.json
+CLEAN_EXTRA=1                           # 0 = never delete other apps' cert directories
 ACME_DIR=/etc/dokploy/traefik/dynamic   # directory holding acme.json
 ACME_FILE=/acme/acme.json
 CERTSYNC_INTERVAL=300                   # seconds between passes

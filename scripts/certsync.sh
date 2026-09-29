@@ -96,6 +96,42 @@ norm CERT_RESOLVER "${CERT_RESOLVER:-}" letsencrypt;     CERT_RESOLVER="$NORM_OU
 norm CERT_DOMAIN   "${CERT_DOMAIN:-}"   "";              CERT_DOMAIN="$NORM_OUT"
 norm SSL_DIR       "${SSL_DIR:-}"       /ssl;            SSL_DIR="$NORM_OUT"
 norm INTERVAL      "${INTERVAL:-}"      300;             INTERVAL="$NORM_OUT"
+norm PG_MATCH      "${PG_MATCH:-}"      -pgsql-billionmail-1; PG_MATCH="$NORM_OUT"
+
+# A shared reverse proxy holds certificates for EVERY app on the host, so syncing
+# all of them would copy other tenants' certificates -- private keys included --
+# into this stack's mail volume. Sync only what this BillionMail instance serves:
+#   - the primary mail hostname (CERT_DOMAIN)
+#   - each domain in BillionMail's own `domain` table, plus that domain's mail
+#     hostname (its a_record, else mail.<domain> -- see public.FormatMX)
+#   - anything listed in EXTRA_DOMAINS, for hostnames BillionMail doesn't know
+#     about (e.g. a webmail or panel hostname)
+# Set SYNC_ALL=1 for the old behaviour of copying every certificate present.
+EXTRA_DOMAINS="${EXTRA_DOMAINS:-}"
+SYNC_ALL="${SYNC_ALL:-0}"
+CLEAN_EXTRA="${CLEAN_EXTRA:-1}"
+
+# Domains BillionMail is configured to serve. Prints one per line.
+# Logs nothing: its output is captured in a command substitution.
+db_domains() {
+    pg=$(docker ps --format '{{.Names}}' 2>/dev/null | grep -- "$PG_MATCH" | head -1 || true)
+    [ -n "$pg" ] || return 0
+    docker exec "$pg" sh -c \
+        'PGPASSWORD="$POSTGRES_PASSWORD" psql -tA -F"|" -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "select domain, a_record from domain"' \
+        2>/dev/null || true
+}
+
+allowed_domains() {
+    printf '%s\n' "$CERT_DOMAIN"
+    printf '%s\n' "$EXTRA_DOMAINS" | tr ',;' '  ' | tr ' ' '\n'
+
+    db_domains | tr -d '\r' | while IFS='|' read -r d a; do
+        [ -n "$d" ] || continue
+        printf '%s\n' "$d"
+        [ -n "$a" ] && printf '%s\n' "$a"
+        printf 'mail.%s\n' "${d#mail.}"
+    done | sort -u
+}
 
 if [ -z "$CERT_DOMAIN" ]; then
     log "CERT_DOMAIN is empty (set BILLIONMAIL_HOSTNAME); nothing to do"
@@ -197,9 +233,23 @@ sync_once() {
         return 0
     fi
 
+    # Which of those this instance actually serves. A shared proxy holds every
+    # app's certificates, so without this filter other tenants' private keys land
+    # in this stack's mail volume.
+    allowed_flat=" "
+    if [ "$SYNC_ALL" != "1" ]; then
+        allowed=$(allowed_domains | tr -d '\r' | sed '/^$/d' | sort -u)
+        allowed_flat=" $(printf '%s' "$allowed" | tr '\n' ' ') "
+        log "allowed domains: $(printf '%s' "$allowed" | tr '\n' ' ')"
+        [ -n "$CERT_DOMAIN" ] || log "WARNING: CERT_DOMAIN is empty; only database/EXTRA_DOMAINS entries will sync"
+    else
+        log "SYNC_ALL=1: copying every certificate present in acme.json"
+    fi
+
     tmp=$(mktemp -d)
     CHANGED=0
     synced=""
+    skipped=""
 
     for d in $domains; do
         # Domains become path components, so refuse anything that is not a hostname.
@@ -209,6 +259,13 @@ sync_once() {
                 continue
                 ;;
         esac
+
+        if [ "$SYNC_ALL" != "1" ]; then
+            case "$allowed_flat" in
+                *" $d "*) ;;
+                *) skipped="$skipped $d"; continue ;;
+            esac
+        fi
 
         c=$(extract_field "$d" certificate)
         k=$(extract_field "$d" key)
@@ -234,6 +291,26 @@ sync_once() {
         synced="$synced $d"
     done
     rm -rf "$tmp"
+
+    [ -n "$skipped" ] && log "not ours, skipped:$skipped"
+
+    # Remove per-domain directories left behind by an earlier run that copied
+    # everything. Only directories carrying this script's own two filenames are
+    # touched, and never the primary's.
+    if [ "$SYNC_ALL" != "1" ] && [ "$CLEAN_EXTRA" = "1" ]; then
+        removed=""
+        for dir in "$SSL_DIR"/*/; do
+            [ -d "$dir" ] || continue
+            extra=$(basename "$dir")
+            [ "$extra" = "$CERT_DOMAIN" ] && continue
+            case "$allowed_flat" in *" $extra "*) continue ;; esac
+            if [ -f "$dir/fullchain.pem" ] && [ -f "$dir/privkey.pem" ]; then
+                rm -rf "$dir"
+                removed="$removed $extra"
+            fi
+        done
+        [ -n "$removed" ] && log "removed certificates belonging to other apps:$removed"
+    fi
 
     if [ -z "$synced" ]; then
         log "no certificates could be installed"
