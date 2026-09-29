@@ -277,6 +277,12 @@ simply older than the deploy. The symptoms are misleading and look unrelated:
 `No matches` is dovecot reporting that `!include conf.d/*.conf` matched no files --
 because the mounted directory is empty.
 
+Note the asymmetry that makes this so confusing: **file** mounts keep working (a file's
+inode survives while a container still references it), so dovecot reads its
+`dovecot.conf` happily and only then dies on the directory-based include. Only
+**directory** mounts go empty. That is why the failure looks like a dovecot config bug
+rather than a deployment problem.
+
 ### Fix
 
 ```bash
@@ -307,6 +313,22 @@ docker exec $(docker ps --format '{{.Names}}' | grep -- '-dovecot-billionmail-1'
 timeout 5 bash -c 'exec 3<>/dev/tcp/127.0.0.1/143; head -c 120 <&3'; echo   # expect "* OK ... Dovecot ready."
 docker exec $(docker ps --format '{{.Names}}' | grep -- '-postfix-billionmail-1') ls /etc/postfix/sql/ | wc -l
 ```
+
+### Automatic recovery
+
+`--if-stale` makes the script safe to run unattended: it costs one `ls` inside the
+dovecot container when the stack is healthy, and only recreates when a container is
+actually reading an empty configuration directory. One-time setup on the host, and no
+deploy can leave a service broken for more than a few minutes:
+
+```bash
+cat > /etc/cron.d/bm-recreate <<'EOF'
+*/5 * * * * root /etc/dokploy/compose/<project>/code/scripts/recreate-stack.sh --if-stale >> /var/log/bm-recreate.log 2>&1
+EOF
+```
+
+It reports `configuration is current; nothing to do` on a healthy stack, so the log
+stays quiet.
 
 ### Long-term
 
