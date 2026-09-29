@@ -56,13 +56,16 @@ install_once() {
         return 0
     fi
 
-    # The parent of the checkout is stable, so resolve the script through the mount
-    # rather than trusting the label's absolute path.
+    # TWO different paths, and mixing them up is silent until cron fails at 3am:
+    #   - verify through the mount, using this container's own view  (/stack/code/...)
+    #   - write the HOST path into cron, because cron runs on the host, where the
+    #     mount point /stack does not exist at all
     dir=${workdir##*/}
-    script="$STACK_DIR/$dir/scripts/recreate-stack.sh"
+    script_here="$STACK_DIR/$dir/scripts/recreate-stack.sh"
+    script_on_host="$workdir/scripts/recreate-stack.sh"
 
-    if [ ! -f "$script" ]; then
-        log "$script not found (is the parent of the checkout mounted at $STACK_DIR?); skipping"
+    if [ ! -f "$script_here" ]; then
+        log "$script_here not found (is the parent of the checkout mounted at $STACK_DIR?); skipping"
         return 0
     fi
 
@@ -78,7 +81,7 @@ install_once() {
 # read an empty configuration directory. This repairs that automatically.
 #
 # Harmless when the stack is healthy: --if-stale exits without doing anything.
-$SCHEDULE root $script --if-stale >> /var/log/bm-recreate.log 2>&1
+$SCHEDULE root $script_on_host --if-stale >> /var/log/bm-recreate.log 2>&1
 EOF
 
     if [ -f "$CRON_FILE" ] && cmp -s "$tmp" "$CRON_FILE"; then
@@ -90,7 +93,7 @@ EOF
     chmod 644 "$CRON_FILE"
     rm -f "$tmp"
     log "installed $CRON_FILE:"
-    log "  $SCHEDULE root $script --if-stale"
+    log "  $SCHEDULE root $script_on_host --if-stale"
 }
 
 install_once

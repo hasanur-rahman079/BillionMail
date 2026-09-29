@@ -263,7 +263,7 @@ services:
         - INSTALL_CRON=${INSTALL_CRON:-1}
         - GUARD_SCHEDULE=${GUARD_SCHEDULE:-*/5 * * * *}
         # Bump whenever scripts/install-guard.sh changes (same reason as CERTSYNC_VERSION).
-        - GUARD_VERSION=${GUARD_VERSION:-1}
+        - GUARD_VERSION=${GUARD_VERSION:-2}
       volumes:
         - ./scripts/install-guard.sh:/install-guard.sh:ro
         - ../:/stack:ro
