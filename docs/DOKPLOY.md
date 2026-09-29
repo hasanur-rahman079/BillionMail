@@ -232,6 +232,72 @@ cloud, Hostinger proxy) answers port 80 itself, so the challenge never reaches T
 and validation fails. BillionMail's own UI says the same thing: *"If using CloudFlare,
 please select [DNS only] when adding records."*
 
+## 4. After every deploy: recreate the containers
+
+This is the most damaging trap in this stack, and it is inherited from upstream.
+
+Every service takes its configuration from **relative bind mounts into the git
+checkout** (`./conf/dovecot/conf.d`, `./conf/postfix/main.cf`, `./logs/...`). A deploy
+replaces that checkout directory, but Docker Compose only recreates the services whose
+*configuration* changed. Every other container keeps its previous bind mount, which now
+points at the **deleted** directory, so it sees an empty config.
+
+Nothing about the container looks wrong -- it is `Up`, and its `Created` timestamp is
+simply older than the deploy. The symptoms are misleading and look unrelated:
+
+| Service | Log | User-visible effect |
+|---|---|---|
+| dovecot | `doveconf: Fatal: Error in configuration file /etc/dovecot/dovecot.conf line 120: No matches` | IMAP answers `* BYE Auth process broken`; Roundcube shows **"Connection to storage server failed"** |
+| postfix | `warning: open "pgsql" configuration "/etc/postfix/sql/pgsql_virtual_domains_maps.cf": No such file or directory` | local recipient/mailbox resolution broken |
+| core | `error adding file watcher "/opt/billionmail/logs/postfix" does not exist` | cosmetic |
+
+`No matches` is dovecot reporting that `!include conf.d/*.conf` matched no files --
+because the mounted directory is empty.
+
+### Fix
+
+```bash
+# from anywhere on the host; derives the project name from a container label,
+# so it can never create a second stack
+/opt/.../code/scripts/recreate-stack.sh
+```
+
+Equivalently, by hand:
+
+```bash
+cd /etc/dokploy/compose/<project>/code
+docker compose -p <project> up -d --force-recreate
+```
+
+The `-p` is essential: the compose file declares `name: billionmail` while the platform
+runs the project as `<project>`, so omitting `-p` starts a **second** stack with fresh
+volumes.
+
+`scripts/recreate-stack.sh` prints the derived project and working directory, runs the
+recreate, then verifies dovecot's config parses, shows the IMAP banner, and counts
+postfix's SQL maps.
+
+### Verify
+
+```bash
+docker exec $(docker ps --format '{{.Names}}' | grep -- '-dovecot-billionmail-1') dovecot -n | head -3
+timeout 5 bash -c 'exec 3<>/dev/tcp/127.0.0.1/143; head -c 120 <&3'; echo   # expect "* OK ... Dovecot ready."
+docker exec $(docker ps --format '{{.Names}}' | grep -- '-postfix-billionmail-1') ls /etc/postfix/sql/ | wc -l
+```
+
+### Long-term
+
+Two ways to stop needing this step. Neither is implemented yet; ask before relying on
+one:
+
+1. **Force recreation on every deploy** -- if the platform's *Rebuild* action recreates
+   every container regardless of config changes, use it instead of *Deploy*. Test by
+   comparing container `Created` timestamps before and after.
+2. **Move runtime configuration out of the checkout** -- seed the config directories into
+   named volumes from a container that mounts the *parent* of the checkout (which the
+   deploy does not replace), so consumers never depend on the checkout at all. A real
+   change to this fork, but the only version that needs nothing from a human.
+
 ## Required environment
 
 `.env` must define at least:
